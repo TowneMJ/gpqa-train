@@ -1,0 +1,13 @@
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Venv (if you use one)
+venv/
+.venv/
+
+lm-evaluation-harness/
