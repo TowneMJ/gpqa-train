@@ -257,7 +257,7 @@ STYLES = [
     "Scene-setting: Start with 'In an experiment...' or 'While investigating...'"
 ]
 
-# Topics to cover - focused on Mason's expertise areas
+# Topics to cover - focused on expertise areas
 TOPICS = [
     # DNA damage and repair
     "DNA double-strand break repair (NHEJ vs HR)",
@@ -427,8 +427,8 @@ if __name__ == "__main__":
     print("=== GPQA Synthetic Data Generator ===\n")
     
     # Test with a small batch
-    print("Generating test batch of 3 questions...")
-    results = generate_batch(batch_size=3)
+    print("Generating test batch of 20 questions...")
+    results = generate_batch(batch_size=20)
     
     # Report results
     valid = sum(1 for r in results if r.get("success"))
