@@ -46,6 +46,12 @@ $PIP openai httpx
 echo "Installing data tools..."
 $PIP pandas jsonlines python-dotenv tqdm
 
+# Export API keys from .env
+if [ -f .env ]; then
+    export $(cat .env | xargs)
+    echo "API keys loaded from .env"
+fi
+
 # Login to HuggingFace (will prompt for token if not cached)
 huggingface-cli login --token $HF_TOKEN 2>/dev/null || echo "Set HF_TOKEN or run 'huggingface-cli login' manually"
 
