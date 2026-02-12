@@ -105,21 +105,28 @@ def call_kimi(prompt: str, max_tokens: int = 4096) -> dict:
         return {"success": False, "error": str(e)}
 
 
-def call_gemini(prompt: str, max_tokens: int = 4096) -> dict:
-    """Call Gemini API."""
-    try:
-        response = GEMINI_CLIENT.chat.completions.create(
-            model=GEMINI_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=max_tokens
-        )
-        return {
-            "success": True,
-            "content": response.choices[0].message.content
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+def call_gemini(prompt: str, max_tokens: int = 4096, max_retries: int = 3) -> dict:
+    """Call Gemini API with retry logic for rate limits."""
+    for attempt in range(max_retries):
+        try:
+            response = GEMINI_CLIENT.chat.completions.create(
+                model=GEMINI_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=max_tokens
+            )
+            return {
+                "success": True,
+                "content": response.choices[0].message.content
+            }
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str and attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 10  # 10s, 20s, 30s
+                print(f"Rate limited, waiting {wait_time}s...", end=" ", flush=True)
+                time.sleep(wait_time)
+                continue
+            return {"success": False, "error": error_str}
 
 
 def format_question_for_screening(q: dict) -> str:
@@ -264,7 +271,7 @@ def gemini_screen(q: dict, kimi_result: dict = None) -> dict:
         kimi_picked = kimi_result.get("kimi_answer_original", "?")
         kimi_reasoning = kimi_result.get("kimi_reasoning", "No reasoning provided")
         
-        prompt = f"""You are a PhD-level molecular biologist reviewing a graduate exam question for quality.
+        prompt = f"""Review this biology exam question. Be concise (under 300 words).
 
 QUESTION:
 {question_text}
@@ -279,25 +286,19 @@ STATED REASONING:
 
 ---
 
-IMPORTANT CONTEXT: When this question was posed to another expert model, it selected answer {kimi_picked} instead of {correct_letter}.
-
-The other model's reasoning was:
-{kimi_reasoning}
+CONTEXT: Another model selected {kimi_picked} instead of {correct_letter}.
 
 ---
 
-IMPORTANT: Start your response with your verdict on the first line, then explain.
+First line must be: VERDICT: PASS or VERDICT: FAIL
 
-Format:
-VERDICT: PASS or VERDICT: FAIL
-
-Then explain:
-1. Is the stated correct answer ({correct_letter}) truly unambiguous and defensible?
-2. Is the alternative answer ({kimi_picked}) arguably correct? If so, why?
-3. Are there any logical inconsistencies or flaws in the question or reasoning?"""
+Then briefly explain (2-3 paragraphs max):
+- Is {correct_letter} unambiguously correct?
+- Is {kimi_picked} defensible?
+- Any logical flaws?"""
 
     else:
-        prompt = f"""You are a PhD-level molecular biologist reviewing a graduate exam question for quality.
+        prompt = f"""Review this biology exam question. Be concise (under 300 words).
 
 QUESTION:
 {question_text}
@@ -312,16 +313,12 @@ STATED REASONING:
 
 ---
 
-IMPORTANT: Start your response with your verdict on the first line, then explain.
+First line must be: VERDICT: PASS or VERDICT: FAIL
 
-Format:
-VERDICT: PASS or VERDICT: FAIL
-
-Then explain:
-1. Is the stated correct answer truly correct and well-supported by the reasoning?
-2. Are any of the distractors arguably correct or poorly constructed?
-3. Are there any logical inconsistencies, unused experimental conditions, or flaws in the question?
-4. Is the reasoning scientifically accurate?"""
+Then briefly explain (2-3 paragraphs max):
+- Is the correct answer truly correct?
+- Are any distractors arguably correct?
+- Any logical flaws or inconsistencies?"""
 
     response = call_gemini(prompt)
     
@@ -633,7 +630,7 @@ def run_ai_screening(questions: list[dict], expert_domains: list[str]) -> tuple[
         kimi_agreed = kimi_result["passed"]
         print("✓ Agreed" if kimi_agreed else f"✗ Picked {kimi_result.get('kimi_answer_original', '?')}")
         
-        time.sleep(1)  # Rate limiting
+        time.sleep(5)  # Rate limiting - 5 seconds for Gemini free tier (15 req/min)
         
         # Gemini screen
         print("    Gemini check...", end=" ", flush=True)
@@ -656,7 +653,8 @@ def run_ai_screening(questions: list[dict], expert_domains: list[str]) -> tuple[
             continue
         
         gemini_passed = gemini_result["passed"]
-        print("✓ Pass" if gemini_passed else "✗ Fail")
+        gemini_verdict = gemini_result.get("gemini_verdict")
+        print(f"{'✓ Pass' if gemini_passed else '✗ Fail'} (verdict: {gemini_verdict})")
         
         if gemini_passed and kimi_agreed:
             # Auto-verify
@@ -679,13 +677,14 @@ def run_ai_screening(questions: list[dict], expert_domains: list[str]) -> tuple[
                     "kimi_answer": kimi_result.get("kimi_answer_original") if not kimi_agreed else None,
                     "kimi_reasoning": kimi_result.get("kimi_reasoning") if not kimi_agreed else None,
                     "gemini_failed": not gemini_passed,
+                    "gemini_verdict": gemini_result.get("gemini_verdict"),
                     "gemini_reasoning": gemini_result.get("gemini_reasoning"),
                     "adjudication_mode": gemini_result.get("adjudication_mode"),
                     "verification_tag": "human-verified-flagged"
                 }
             })
         
-        time.sleep(1)  # Rate limiting
+        time.sleep(5)  # Rate limiting - 5 seconds between questions
     
     print("-" * 50)
     print(f"Screening complete:")

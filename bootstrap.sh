@@ -53,7 +53,7 @@ if [ -f .env ]; then
 fi
 
 # Login to HuggingFace (will prompt for token if not cached)
-huggingface-cli login --token $HF_TOKEN 2>/dev/null || echo "Set HF_TOKEN or run 'huggingface-cli login' manually"
+hf auth login --token $HF_TOKEN 2>/dev/null || echo "Set HF_TOKEN or run 'hf auth login' manually"
 
 echo ""
 echo "=== Bootstrap complete ==="
