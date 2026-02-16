@@ -74,7 +74,7 @@ def call_kimi(prompt: str, max_tokens: int = 1024, temperature: float = 0.3) -> 
         response = KIMI_CLIENT.chat.completions.create(
             model=KIMI_MODEL,
             messages=[
-                {"role": "system", "content": "You are a PhD-level scientific reviewer. First state your verdict as either AGREE or DISAGREE on its own line, then briefly explain your reasoning in 2-3 sentences."},
+                {"role": "system", "content": "You are a PhD-level scientific reviewer. Your task is to review and scrutinize potential graduate-level test questions. You will receive a candidate question, the intended correct answer, a list of distractors, and a reasoning explanation. You will also receive an assessment of the question's quality by an AI reviewer, Gemini, for further context. Evaluate the provided materials, searching for issues of scientific innacuracy, logical inconsistency, ambiguity, reliance on pure recall rather than reasoning, and general poor quality. Initially state your verdict as either NO ISSUES or ISSUES FOUND on its own line, then briefly explain your critique in 3-5 sentences."},
                 {"role": "user", "content": prompt}
             ],
             temperature=temperature,
@@ -220,7 +220,7 @@ def kimi_validate(q: dict, gemini_critique: str, gemini_has_issues: bool) -> dic
     else:
         gemini_summary = "Gemini found NO ISSUES with this question."
     
-    prompt = f'''Review this question and Gemini's assessment.
+    prompt = f'''Evaluate this test question and Gemini's assessment.
 
 QUESTION UNDER REVIEW:
 {question_text}
@@ -228,7 +228,7 @@ QUESTION UNDER REVIEW:
 GEMINI'S ASSESSMENT:
 {gemini_summary}
 
-State AGREE or DISAGREE on the first line, then briefly explain why in 2-3 sentences.'''
+State NO ISSUES or ISSUES FOUND on the first line, then briefly explain why in 3-5 sentences.'''
 
     response = call_kimi(prompt, max_tokens=8192, temperature=0.1)
     
