@@ -427,10 +427,13 @@ def save_results(results: list[dict], filename: str = None):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{OUTPUT_DIR}/batch_{timestamp}.json"
     
-    with open(filename, "w") as f:
-        json.dump(results, f, indent=2)
+    # Only save successful questions
+    valid_results = [r for r in results if r.get("success")]
     
-    print(f"Saved to {filename}")
+    with open(filename, "w") as f:
+        json.dump(valid_results, f, indent=2)
+    
+    print(f"Saved {len(valid_results)} valid questions to {filename}")
     return filename
 
 
