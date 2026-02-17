@@ -4,8 +4,8 @@ Flow:
 1. Human selects confident domains for direct review
 2. Remaining questions go through:
    a. Gemini critique (identifies any issues)
-   b. Kimi validation (agrees/disagrees with Gemini's assessment)
-3. Auto-pass if Gemini finds no issues AND Kimi agrees
+   b. Kimi independent evaluation (with Gemini's assessment as context)
+3. Auto-pass if both models find no issues
 4. Otherwise, human review with AI notes
 """
 
@@ -14,6 +14,7 @@ import sys
 import os
 import re
 import random
+import requests
 import time
 from datetime import datetime
 from openai import OpenAI
@@ -68,32 +69,36 @@ def get_domains(questions: list[dict]) -> list[str]:
 
 # === API CALL FUNCTIONS ===
 
-def call_kimi(prompt: str, max_tokens: int = 1024, temperature: float = 0.3) -> dict:
-    """Call Kimi API."""
+def call_kimi(prompt: str, max_tokens: int = 2048, temperature: float = 0.6) -> dict:
+    """Call Kimi API via direct HTTP request."""
     try:
-        response = KIMI_CLIENT.chat.completions.create(
-            model=KIMI_MODEL,
-            messages=[
-                {"role": "system", "content": "You are a PhD-level scientific reviewer. Your task is to review and scrutinize potential graduate-level test questions. You will receive a candidate question, the intended correct answer, a list of distractors, and a reasoning explanation. You will also receive an assessment of the question's quality by an AI reviewer, Gemini, for further context. Evaluate the provided materials, searching for issues of scientific innacuracy, logical inconsistency, ambiguity, reliance on pure recall rather than reasoning, and general poor quality. Initially state your verdict as either NO ISSUES or ISSUES FOUND on its own line, then briefly explain your critique in 3-5 sentences."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=temperature,
-            max_tokens=max_tokens
+        response = requests.post(
+            "https://integrate.api.nvidia.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {os.getenv('NVIDIA_API_KEY')}",
+                "Accept": "application/json",
+            },
+            json={
+                "model": KIMI_MODEL,
+                "messages": [
+                    {"role": "system", "content": "You are a PhD-level scientific reviewer. Your task is to review and scrutinize potential graduate-level test questions. You will receive a candidate question, the intended correct answer, a list of distractors, and a reasoning explanation. You will also receive an assessment of the question's quality by an AI reviewer, Gemini, for further context. Evaluate the provided materials, searching for issues of scientific inaccuracy, logical inconsistency, ambiguity, reliance on pure recall rather than reasoning, and general poor quality. Only flag issues that would make the question genuinely unsuitable for a graduate exam. Minor stylistic concerns, theoretical edge cases, or pedantic objections about wording that would not confuse a knowledgeable student should NOT be flagged. Be thorough but honest. Initially state your verdict as either NO ISSUES or ISSUES FOUND on its own line, then briefly explain your critique in 3-5 sentences."},
+                    {"role": "user", "content": prompt}
+                ],
+                "chat_template_kwargs": {"thinking": True},
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
         )
+        response.raise_for_status()
+        data = response.json()
         
-        message = response.choices[0].message
-        content = message.content
-        reasoning = None
-        
-        try:
-            msg_dict = message.model_dump() if hasattr(message, 'model_dump') else message.__dict__
-            reasoning = msg_dict.get('reasoning_content') or msg_dict.get('reasoning')
-        except:
-            pass
+        message = data["choices"][0]["message"]
+        content = message.get("content")
+        reasoning = message.get("reasoning_content")
         
         if not content and reasoning:
             return {
-                "success": True, 
+                "success": True,
                 "content": None,
                 "reasoning": reasoning,
                 "note": "No final answer, only reasoning"
@@ -177,7 +182,7 @@ If you find ANY issues, describe each one specifically and clearly.
 
 If the question is sound with no issues, respond with exactly: NO ISSUES FOUND
 
-Be thorough but honest. Do not invent problems that don't exist."""
+Be critical and thorough, but honest."""
 
     response = call_gemini(prompt)
     
@@ -208,15 +213,15 @@ Be thorough but honest. Do not invent problems that don't exist."""
     }
 
 
-def kimi_validate(q: dict, gemini_critique: str, gemini_has_issues: bool) -> dict:
+def kimi_validate(q: dict, gemini_critique_text: str, gemini_has_issues: bool) -> dict:
     """
-    Have Kimi validate Gemini's assessment.
-    Returns dict with 'agrees', 'response', 'error'.
+    Have Kimi independently evaluate the question, with Gemini's assessment as context.
+    Returns dict with 'has_issues', 'response', 'error'.
     """
     question_text = format_question_for_review(q)
     
     if gemini_has_issues:
-        gemini_summary = f"Gemini found the following issues:\n{gemini_critique}"
+        gemini_summary = f"Gemini found the following issues:\n{gemini_critique_text}"
     else:
         gemini_summary = "Gemini found NO ISSUES with this question."
     
@@ -230,11 +235,23 @@ GEMINI'S ASSESSMENT:
 
 State NO ISSUES or ISSUES FOUND on the first line, then briefly explain why in 3-5 sentences.'''
 
-    response = call_kimi(prompt, max_tokens=8192, temperature=0.1)
+    response = call_kimi(prompt, max_tokens=2048, temperature=0.6)
+    
+    # Debug log
+    with open("kimi_debug.log", "a") as log:
+        log.write(f"\n{'='*50}\n")
+        log.write(f"Time: {datetime.now()}\n")
+        log.write(f"Success: {response.get('success')}\n")
+        log.write(f"Content type: {type(response.get('content'))}\n")
+        log.write(f"Content: {repr(response.get('content', ''))[:500]}\n")
+        log.write(f"Reasoning type: {type(response.get('reasoning'))}\n")
+        log.write(f"Reasoning: {repr(response.get('reasoning', ''))[:500]}\n")
+        log.write(f"Error: {response.get('error')}\n")
+        log.write(f"Note: {response.get('note')}\n")
     
     if not response["success"]:
         return {
-            "agrees": None,
+            "has_issues": None,
             "response": None,
             "error": response["error"]
         }
@@ -242,35 +259,66 @@ State NO ISSUES or ISSUES FOUND on the first line, then briefly explain why in 3
     content = response.get("content")
     reasoning = response.get("reasoning")
     
-    text_to_parse = content if content else reasoning
+    # If no actual content, treat as a failure — don't parse reasoning
+    # as it may contain misleading phrases like "no issues" in chain-of-thought
+    if not content:
+        return {
+            "has_issues": None,
+            "response": reasoning[:500] if reasoning else "No response",
+            "error": "No final answer from Kimi (only reasoning)"
+        }
+    
+    text_to_parse = content
     
     if not text_to_parse or not isinstance(text_to_parse, str):
         return {
-            "agrees": None,
+            "has_issues": None,
             "response": f"No parseable response. Content: {repr(content)[:50]}, Reasoning: {repr(reasoning)[:50]}",
             "error": "Could not get Kimi response"
         }
     
+    # Parse response - look for NO ISSUES or ISSUES FOUND
     text_clean = text_to_parse.strip().upper()
     
-    if "AGREE" in text_clean and "DISAGREE" not in text_clean:
+    # Split into first line and the rest for explanation
+    lines = text_to_parse.strip().split('\n')
+    first_line = lines[0].strip().upper()
+    explanation = '\n'.join(lines[1:]).strip() if len(lines) > 1 else text_to_parse.strip()
+    
+    # Check first line preferentially, fall back to full text
+    if "ISSUES FOUND" in first_line and "NO ISSUES" not in first_line:
         return {
-            "agrees": True,
-            "response": content or "(from reasoning)",
+            "has_issues": True,
+            "response": explanation or text_to_parse[:500],
             "error": None
         }
     
-    if "DISAGREE" in text_clean:
+    if "NO ISSUES" in first_line:
         return {
-            "agrees": False,
-            "response": content or text_to_parse[:200],
+            "has_issues": False,
+            "response": explanation or text_to_parse[:500],
+            "error": None
+        }
+    
+    # Fallback: check full text
+    if "ISSUES FOUND" in text_clean and "NO ISSUES" not in text_clean:
+        return {
+            "has_issues": True,
+            "response": text_to_parse[:500],
+            "error": None
+        }
+    
+    if "NO ISSUES" in text_clean:
+        return {
+            "has_issues": False,
+            "response": text_to_parse[:500],
             "error": None
         }
     
     return {
-        "agrees": None,
-        "response": text_to_parse[:300],
-        "error": "Could not determine agreement"
+        "has_issues": None,
+        "response": text_to_parse[:500],
+        "error": "Could not determine verdict"
     }
 
 
@@ -334,16 +382,17 @@ def display_question(q: dict, num: int, total: int, flags: dict = None):
         if flags.get("source") == "expert_domain":
             print("  📋 DIRECT REVIEW (your expert domain)")
         else:
-            # Show screening results
+            # Show Gemini screening results
             if flags.get("gemini_has_issues"):
-                print("  ⚠️  GEMINI FOUND ISSUES")
-            else:
+                print("  ⚠️  GEMINI: Issues found")
+            elif flags.get("gemini_has_issues") is False:
                 print("  ✓  Gemini: No issues found")
             
-            if flags.get("kimi_agrees") is True:
-                print("  ✓  Kimi: Agrees with Gemini")
-            elif flags.get("kimi_agrees") is False:
-                print("  ⚠️  KIMI DISAGREES WITH GEMINI")
+            # Show Kimi screening results
+            if flags.get("kimi_has_issues") is True:
+                print("  ⚠️  KIMI: Issues found")
+            elif flags.get("kimi_has_issues") is False:
+                print("  ✓  Kimi: No issues found")
             elif flags.get("kimi_error"):
                 print(f"  ⚠️  Kimi error: {flags.get('kimi_error', '')[:40]}")
         
@@ -373,17 +422,17 @@ def display_question(q: dict, num: int, total: int, flags: dict = None):
     thinking = q.get('thinking', '')[:500]
     print(f"  {thinking}{'...' if len(q.get('thinking', '')) > 500 else ''}")
     
-    # Show AI critique if present
+    # Show AI critiques if present
     if flags and flags.get("gemini_critique"):
         print("-" * 70)
         print("GEMINI'S CRITIQUE:")
         critique = flags["gemini_critique"][:600]
         print(f"  {critique}{'...' if len(flags.get('gemini_critique', '')) > 600 else ''}")
     
-    if flags and flags.get("kimi_response") and flags.get("kimi_agrees") is False:
+    if flags and flags.get("kimi_response"):
         print("-" * 70)
-        print("KIMI'S DISAGREEMENT:")
-        print(f"  {flags['kimi_response'][:300]}")
+        print("KIMI'S CRITIQUE:")
+        print(f"  {flags['kimi_response'][:600]}{'...' if len(flags.get('kimi_response', '')) > 600 else ''}")
     
     print("=" * 70)
 
@@ -438,26 +487,28 @@ def display_ai_analysis(q: dict, flags: dict = None):
     
     if flags.get("gemini_has_issues"):
         print("\n⚠️  Gemini found issues:\n")
-    else:
+    elif flags.get("gemini_has_issues") is False:
         print("\n✓ Gemini found no issues:\n")
+    else:
+        print("\n? Gemini status unknown:\n")
     
     print(flags.get("gemini_critique", "(No critique captured)"))
     
     # Kimi section
     print("\n" + "=" * 70)
-    print("KIMI VALIDATION:")
+    print("KIMI CRITIQUE:")
     print("=" * 70)
     
-    if flags.get("kimi_agrees") is True:
-        print("\n✓ Kimi AGREES with Gemini's assessment")
-    elif flags.get("kimi_agrees") is False:
-        print("\n⚠️  Kimi DISAGREES with Gemini")
+    if flags.get("kimi_has_issues") is True:
+        print("\n⚠️  Kimi found issues:\n")
+    elif flags.get("kimi_has_issues") is False:
+        print("\n✓ Kimi found no issues:\n")
     else:
-        print("\n⚠️  Could not determine Kimi's position")
+        print("\n⚠️  Could not determine Kimi's verdict:\n")
     
     kimi_response = flags.get("kimi_response", "")
     if kimi_response:
-        print(f"\nKimi's response:\n{kimi_response}")
+        print(kimi_response)
     
     if flags.get("kimi_error"):
         print(f"\nKimi error: {flags['kimi_error']}")
@@ -527,26 +578,24 @@ def run_ai_screening(questions: list[dict], expert_domains: list[str]) -> tuple[
         
         time.sleep(2)  # Rate limiting
         
-        # Step 2: Kimi validation
-        print("    Kimi validation...", end=" ", flush=True)
+        # Step 2: Kimi independent evaluation
+        print("    Kimi evaluation...", end=" ", flush=True)
         kimi_result = kimi_validate(q, gemini_critique_text, gemini_has_issues)
+        
+        kimi_has_issues = kimi_result.get("has_issues")
         
         if kimi_result.get("error"):
             print(f"ERROR: {kimi_result['error'][:40]}")
-            # Still usable, just without Kimi validation
-            kimi_agrees = None
-        else:
-            kimi_agrees = kimi_result["agrees"]
-            if kimi_agrees:
-                print("✓ Agrees")
-            else:
-                print("⚠️  Disagrees")
+        elif kimi_has_issues is False:
+            print("✓ No issues")
+        elif kimi_has_issues is True:
+            print("⚠️  Issues found")
         
         time.sleep(2)  # Rate limiting
         
         # Determine outcome
-        # Auto-pass only if: Gemini found no issues AND Kimi agrees
-        if not gemini_has_issues and kimi_agrees is True:
+        # Auto-pass only if: both Gemini and Kimi found no issues
+        if not gemini_has_issues and kimi_has_issues is False:
             auto_verified.append({
                 "question": q,
                 "flags": {
@@ -554,7 +603,7 @@ def run_ai_screening(questions: list[dict], expert_domains: list[str]) -> tuple[
                     "verification_tag": "model-verified",
                     "gemini_has_issues": False,
                     "gemini_critique": gemini_critique_text,
-                    "kimi_agrees": True,
+                    "kimi_has_issues": False,
                     "kimi_response": kimi_result.get("response", "")
                 }
             })
@@ -567,7 +616,7 @@ def run_ai_screening(questions: list[dict], expert_domains: list[str]) -> tuple[
                     "verification_tag": "human-review-needed",
                     "gemini_has_issues": gemini_has_issues,
                     "gemini_critique": gemini_critique_text,
-                    "kimi_agrees": kimi_agrees,
+                    "kimi_has_issues": kimi_has_issues,
                     "kimi_response": kimi_result.get("response", ""),
                     "kimi_error": kimi_result.get("error")
                 }
@@ -582,12 +631,13 @@ def run_ai_screening(questions: list[dict], expert_domains: list[str]) -> tuple[
     
     return expert_queue, flagged_queue, auto_verified
 
+
 def browse_auto_verified(auto_verified: list):
     """Browse questions that passed both AI models."""
     if not auto_verified:
         print("\nNo auto-verified questions to browse.")
         input("Press Enter to continue...")
-        return
+        return None
     
     current = 0
     
@@ -656,6 +706,7 @@ def browse_auto_verified(auto_verified: list):
     
     return None
 
+
 def review_session(filepath: str):
     """Run a tiered review session."""
     
@@ -680,6 +731,9 @@ def review_session(filepath: str):
     
     # Combine review queues
     review_queue = expert_queue + flagged_queue
+    
+    # Initialize review tracking
+    reviews = {}
     
     if not review_queue:
         print(f"\nNo questions flagged for human review.")
@@ -715,13 +769,13 @@ def review_session(filepath: str):
                 if confirm == 'y':
                     return
         
-            # If we broke out due to a revoke, fall through to the main review loop
+        # If we broke out due to a revoke, fall through to the main review loop
     
-    # Track review status
-    reviews = {}
+    # Track review status for any items not yet tracked
     for item in review_queue:
         idx = item["question"]["_index"]
-        reviews[idx] = {"status": "pending", "notes": ""}
+        if idx not in reviews:
+            reviews[idx] = {"status": "pending", "notes": ""}
     
     current = 0
     
@@ -814,13 +868,12 @@ def review_session(filepath: str):
         elif cmd == 'm':
             revoked = browse_auto_verified(auto_verified)
             if revoked:
-                # Add revoked question to the review queue
                 review_queue.append(revoked)
                 idx = revoked["question"]["_index"]
                 reviews[idx] = {"status": "pending", "notes": "revoked from auto-verified"}
                 print(f"Moved to review queue (now {len(review_queue)} questions)")
                 input("Press Enter...")
-
+        
         elif cmd == 's':
             show_summary(review_queue, reviews, auto_verified)
         
@@ -904,7 +957,7 @@ def save_results(review_queue: list, auto_verified: list, reviews: dict, origina
             clean_q['ai_critique'] = {
                 'gemini_critique': flags.get('gemini_critique'),
                 'gemini_has_issues': flags.get('gemini_has_issues'),
-                'kimi_agrees': flags.get('kimi_agrees'),
+                'kimi_has_issues': flags.get('kimi_has_issues'),
                 'kimi_response': flags.get('kimi_response')
             }
             rejected.append(clean_q)

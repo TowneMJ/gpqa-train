@@ -175,3 +175,42 @@ Results: 50/50 valid
 Saved to data/raw/batch_20260212_092614.json
 
 Done! Check data/raw/batch_20260212_092614.json
+nohup: ignoring input
+=== GPQA Synthetic Data Generator ===
+
+Generating 6 questions...
+  Generating 1/6 (attempt 1): molecular biology techniques...
+    ✓ Concept: Temporal kinetics discrimination of direct versus 
+  Generating 2/6 (attempt 2): transcription and gene regulation...
+    ERROR: Error code: 504
+  Generating 2/6 (attempt 3): viral life cycles and host interact...
+    ✓ Concept: Topological sequestration of viral pathogen-associ
+  Generating 3/6 (attempt 4): biochemical assays and analysis...
+    ✓ Concept: Interpretation of multi-transition thermal unfoldi
+  Generating 4/6 (attempt 5): mutagenesis and DNA damage...
+    ✓ Concept: Differential recruitment mechanisms of translesion
+  Generating 5/6 (attempt 6): cytoskeleton and cell motility...
+    ERROR: Error code: 504
+  Generating 5/6 (attempt 7): microbial pathogenesis...
+    ✓ Concept: Cooperative integration of stringent response sign
+  Generating 6/6 (attempt 8): genome editing and genetic engineer...
+    ERROR: Error code: 504
+  Generating 6/6 (attempt 9): classical genetics and inheritance ...
+    ERROR: Error code: 504
+  Generating 6/6 (attempt 10): genomics and sequencing technologie...
+    ✓ Concept: Statistical discrimination of PCR jackpotting arti
+
+Results: 6/6 valid
+  1. ✓ OK
+  2. ✗ Error code: 504
+  3. ✓ OK
+  4. ✓ OK
+  5. ✓ OK
+  6. ✗ Error code: 504
+  7. ✓ OK
+  8. ✗ Error code: 504
+  9. ✗ Error code: 504
+  10. ✓ OK
+Saved to data/raw/batch_20260216_205701.json
+
+Done! Check data/raw/batch_20260216_205701.json
