@@ -1,10 +1,10 @@
 """
-Multi-tier review script v3 for GPQA-style questions.
+Multi-tier review script v5 for GPQA-style questions.
 Flow:
 1. Human selects confident domains for direct review
 2. Remaining questions go through:
-   a. Gemini critique (identifies any issues)
-   b. Kimi independent evaluation (with Gemini's assessment as context)
+   a. Gemini 3 Flash critique (identifies any issues)
+   b. Kimi k2.5 Thinking Mode independent evaluation (with Gemini's assessment as context)
 3. Auto-pass if both models find no issues
 4. Otherwise, human review with AI notes
 """
@@ -24,19 +24,15 @@ load_dotenv()
 
 # === API CLIENTS ===
 
-# Kimi via NVIDIA NIMs
-KIMI_CLIENT = OpenAI(
-    api_key=os.getenv("NVIDIA_API_KEY"),
-    base_url="https://integrate.api.nvidia.com/v1"
-)
+# Kimi via NVIDIA NIMs (direct HTTP for proper thinking mode support)
 KIMI_MODEL = "moonshotai/kimi-k2.5"
 
-# Gemini via Google AI Studio
+# Gemini via Google AI Studio (OpenAI-compatible endpoint)
 GEMINI_CLIENT = OpenAI(
     api_key=os.getenv("GEMINI_API_KEY"),
     base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
 )
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL = "gemini-3-flash-preview"
 
 
 # === DATA LOADING ===
@@ -69,55 +65,101 @@ def get_domains(questions: list[dict]) -> list[str]:
 
 # === API CALL FUNCTIONS ===
 
+KIMI_SYSTEM_PROMPT = (
+    "You are a PhD-level scientific reviewer. Your task is to review and scrutinize "
+    "potential graduate-level test questions. You will receive a candidate question, the intended "
+    "correct answer, a list of distractors, and a reasoning explanation. You will also receive an "
+    "assessment of the question's quality by an AI reviewer, Gemini, for further context. Evaluate "
+    "the provided materials, searching for issues of scientific inaccuracy, logical inconsistency, "
+    "ambiguity, reliance on pure recall rather than reasoning, and general poor quality. Only flag "
+    "issues that would make the question genuinely unsuitable for a graduate exam. Minor stylistic "
+    "concerns, theoretical edge cases, or pedantic objections about wording that would not confuse "
+    "a knowledgeable student should NOT be flagged. Initially state your verdict as either NO ISSUES "
+    "or ISSUES FOUND on its own line, then briefly explain your critique in 3-5 sentences."
+)
+
+GEMINI_SYSTEM_PROMPT = (
+    "You are a rigorous PhD-level scientist reviewing graduate exam questions for quality. "
+    "Focus on issues that would make a question genuinely unsuitable for a graduate exam: "
+    "factual inaccuracies, incorrect stated answers, distractors that are arguably correct, "
+    "or logical inconsistencies in the experimental setup. You must also review the provided reasoning "
+    "for the correct answer and distractors, as this will later be used to instruct students. "
+    "Do not flag minor wording preferences, theoretical edge cases, or stylistic concerns "
+    "that would not mislead a knowledgeable student. Be sure to consider recent relevant research "
+    "studies in your evaluation.Be honest, concise and reasonable."
+)
+
+
 def call_kimi(prompt: str, max_tokens: int = 2048, temperature: float = 0.6) -> dict:
-    """Call Kimi API via direct HTTP request."""
-    try:
-        response = requests.post(
-            "https://integrate.api.nvidia.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {os.getenv('NVIDIA_API_KEY')}",
-                "Accept": "application/json",
-            },
-            json={
-                "model": KIMI_MODEL,
-                "messages": [
-                    {"role": "system", "content": "You are a PhD-level scientific reviewer. Your task is to review and scrutinize potential graduate-level test questions. You will receive a candidate question, the intended correct answer, a list of distractors, and a reasoning explanation. You will also receive an assessment of the question's quality by an AI reviewer, Gemini, for further context. Evaluate the provided materials, searching for issues of scientific inaccuracy, logical inconsistency, ambiguity, reliance on pure recall rather than reasoning, and general poor quality. Only flag issues that would make the question genuinely unsuitable for a graduate exam. Minor stylistic concerns, theoretical edge cases, or pedantic objections about wording that would not confuse a knowledgeable student should NOT be flagged. Be thorough but honest. Initially state your verdict as either NO ISSUES or ISSUES FOUND on its own line, then briefly explain your critique in 3-5 sentences."},
-                    {"role": "user", "content": prompt}
-                ],
-                "chat_template_kwargs": {"thinking": False},
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-            }
-        )
-        response.raise_for_status()
-        data = response.json()
+    """Call Kimi API via direct HTTP. Tries Thinking Mode first, falls back to Instant Mode."""
+    
+    for thinking_mode in [True, False]:
+        mode_label = "thinking" if thinking_mode else "instant"
         
-        message = data["choices"][0]["message"]
-        content = message.get("content")
-        reasoning = message.get("reasoning_content")
+        for attempt in range(2 if thinking_mode else 1):
+            try:
+                response = requests.post(
+                    "https://integrate.api.nvidia.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {os.getenv('NVIDIA_API_KEY')}",
+                        "Accept": "application/json",
+                    },
+                    json={
+                        "model": KIMI_MODEL,
+                        "messages": [
+                            {"role": "system", "content": KIMI_SYSTEM_PROMPT},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "chat_template_kwargs": {"thinking": thinking_mode},
+                        "temperature": temperature if thinking_mode else 0.6,
+                        "max_tokens": max_tokens,
+                    },
+                    timeout=90
+                )
+                response.raise_for_status()
+                data = response.json()
+                
+                message = data["choices"][0]["message"]
+                content = message.get("content")
+                reasoning = message.get("reasoning_content")
+                
+                if not content and reasoning:
+                    # Thinking mode didn't produce final answer, try instant
+                    break
+                
+                if content:
+                    return {"success": True, "content": content, "reasoning": reasoning, "mode": mode_label}
+            
+            except (requests.exceptions.Timeout, requests.exceptions.HTTPError) as e:
+                if attempt == 0 and thinking_mode:
+                    print(f"Timeout ({mode_label}), retrying...", end=" ", flush=True)
+                    time.sleep(10)
+                    continue
+                break
+            except Exception as e:
+                return {"success": False, "error": str(e)}
         
-        if not content and reasoning:
-            return {
-                "success": True,
-                "content": None,
-                "reasoning": reasoning,
-                "note": "No final answer, only reasoning"
-            }
-        
-        return {"success": True, "content": content, "reasoning": reasoning}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+        if thinking_mode:
+            print(f"Falling back to instant mode...", end=" ", flush=True)
+    
+    return {"success": False, "error": "All attempts failed (thinking + instant)"}
 
 
-def call_gemini(prompt: str, max_tokens: int = 4096, max_retries: int = 3) -> dict:
+def call_gemini(prompt: str, system_prompt: str = None, max_tokens: int = 8192, max_retries: int = 3) -> dict:
     """Call Gemini API with retry logic for rate limits."""
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+    
     for attempt in range(max_retries):
         try:
             response = GEMINI_CLIENT.chat.completions.create(
                 model=GEMINI_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_tokens=max_tokens
+                messages=messages,
+                temperature=0.4,
+                max_tokens=max_tokens,
+                extra_body={"reasoning_effort": "medium"}
             )
             return {
                 "success": True,
@@ -165,9 +207,7 @@ def gemini_critique(q: dict) -> dict:
     """
     question_text = format_question_for_review(q)
     
-    prompt = f"""You are a PhD-level scientist reviewing a graduate exam question for quality.
-
-{question_text}
+    prompt = f"""{question_text}
 
 ---
 
@@ -180,11 +220,13 @@ Carefully evaluate this question for any issues:
 
 If you find ANY issues, describe each one specifically and clearly.
 
-If the question is sound with no issues, respond with exactly: NO ISSUES FOUND
+If the question is genuinely sound with no issues, respond with exactly: NO ISSUES FOUND
 
-Be critical and thorough, but honest."""
+Be thorough and critical. Do not invent problems, but do not overlook genuine issues. If you are uncertain whether something is correct, flag it for review rather than assuming it is fine.
 
-    response = call_gemini(prompt)
+State your verdict FIRST on its own line as either NO ISSUES FOUND or ISSUES FOUND, then provide your detailed analysis below."""
+
+    response = call_gemini(prompt, system_prompt=GEMINI_SYSTEM_PROMPT)
     
     if not response["success"]:
         return {
@@ -270,10 +312,10 @@ State NO ISSUES or ISSUES FOUND on the first line, then briefly explain why in 3
     
     text_to_parse = content
     
-    if not text_to_parse or not isinstance(text_to_parse, str):
+    if not isinstance(text_to_parse, str):
         return {
             "has_issues": None,
-            "response": f"No parseable response. Content: {repr(content)[:50]}, Reasoning: {repr(reasoning)[:50]}",
+            "response": f"No parseable response. Content: {repr(content)[:50]}",
             "error": "Could not get Kimi response"
         }
     
@@ -799,7 +841,7 @@ def review_session(filepath: str):
         # Show commands
         print("\nCommands:")
         print("  [v] Verify   [r] Reject   [e] Needs edit   [n] Add note")
-        print("  [f] Full view   [a] AI analysis   [j] Next   [k] Previous   [g] Go to #")
+        print("  [f] Full view   [a] AI analysis   [c] Consult AI   [j] Next   [k] Previous   [g] Go to #")
         print(f"  [m] Browse model-verified ({len(auto_verified)})")
         print("  [s] Summary   [w] Save & quit   [q] Quit without saving")
         
@@ -839,6 +881,50 @@ def review_session(filepath: str):
         elif cmd == 'a':
             display_ai_analysis(q, flags)
         
+        elif cmd == 'c':
+            if flags.get("source") == "expert_domain":
+                print("Sending to AI for review...", end=" ", flush=True)
+                
+                # Run Gemini critique
+                print("\n    Gemini critique...", end=" ", flush=True)
+                gemini_result = gemini_critique(q)
+                
+                if gemini_result.get("error"):
+                    print(f"ERROR: {gemini_result['error'][:40]}")
+                else:
+                    if gemini_result["has_issues"]:
+                        print("⚠️  Issues found")
+                    else:
+                        print("✓ No issues")
+                    flags["gemini_has_issues"] = gemini_result["has_issues"]
+                    flags["gemini_critique"] = gemini_result["critique"]
+                
+                time.sleep(2)
+                
+                # Run Kimi evaluation
+                print("    Kimi evaluation...", end=" ", flush=True)
+                kimi_result = kimi_validate(q, 
+                    gemini_result.get("critique", ""), 
+                    gemini_result.get("has_issues", False))
+                
+                if kimi_result.get("error"):
+                    print(f"ERROR: {kimi_result['error'][:40]}")
+                else:
+                    if kimi_result["has_issues"]:
+                        print("⚠️  Issues found")
+                    else:
+                        print("✓ No issues")
+                    flags["kimi_has_issues"] = kimi_result["has_issues"]
+                    flags["kimi_response"] = kimi_result.get("response", "")
+                    flags["kimi_error"] = kimi_result.get("error")
+                
+                flags["source"] = "expert_consulted_ai"
+                print("\nDone. Use [a] to see full AI analysis.")
+                input("Press Enter...")
+            else:
+                print("AI review already available for this question.")
+                input("Press Enter...")
+
         elif cmd == 'j':
             if current < len(review_queue) - 1:
                 current += 1
@@ -1010,7 +1096,7 @@ def main():
                     review_session(default)
                     return
         
-        print("Usage: python mtreview3.py <batch_file.json>")
+        print("Usage: python mtreview5.py <batch_file.json>")
         return
     
     filepath = sys.argv[1]
