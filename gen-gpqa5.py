@@ -477,6 +477,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate GPQA-style biology questions")
     parser.add_argument("count", type=int, nargs="?", default=10,
                         help="Number of questions to generate (default: 10)")
+    parser.add_argument("--name", type=str, default=None,
+                        help="Custom name for the batch file (e.g., --name molbio_run1)")
     parser.add_argument("--max-retries", type=int, default=10,
                         help="Maximum extra attempts for failed generations (default: 10)")
     args = parser.parse_args()
@@ -496,6 +498,9 @@ if __name__ == "__main__":
         print(f"  {i+1}. {status} {reason}")
     
     # Save
-    outfile = save_results(results)
+    if args.name:
+        outfile = save_results(results, filename=f"{OUTPUT_DIR}/{args.name}.json")
+    else:
+        outfile = save_results(results)
     
     print(f"\nDone! Check {outfile}")
